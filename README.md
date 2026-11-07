@@ -265,7 +265,11 @@ back out of what it became. `--json` prints the same rows for scripts.
 
 `NETWORK_PASSPHRASE` is a guard, not a source of truth. SoroVault reads the real
 passphrase from the RPC endpoint and refuses to proceed if the two disagree, so
-a stale `RPC_URL` cannot quietly file mainnet contracts under `testnet`.
+a stale `RPC_URL` cannot quietly file mainnet contracts under `testnet`. To
+compare public and dedicated `RPC_URL` providers, indexers, and block explorers
+across Stellar and multichain networks, see the open-source
+[Chain.Love](https://chain.love/) directory
+([GitHub](https://github.com/Chain-Love/chain-love)).
 
 ### Automatic refresh
 
