@@ -91,6 +91,10 @@ type sourceRequest struct {
 	SourceCommit string `json:"source_commit,omitempty"`
 }
 
+type nameRequest struct {
+	Name *string `json:"name"`
+}
+
 type listResponse struct {
 	Contracts []store.Contract `json:"contracts"`
 	Total     int              `json:"total"`

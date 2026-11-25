@@ -972,6 +972,14 @@
         "required": ["source_url"],
         "additionalProperties": false
       },
+      "NameRequest": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 100, "description": "Human-readable name for the contract." }
+        },
+        "required": ["name"],
+        "additionalProperties": false
+      },
       "VerifyRequest": {
         "type": "object",
         "properties": {

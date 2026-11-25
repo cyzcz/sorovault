@@ -518,6 +518,43 @@ func (s *Server) updateContractSource(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, contract)
 }
 
+func (s *Server) updateContractName(w http.ResponseWriter, r *http.Request) {
+	var req nameRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Name == nil {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	name, err := store.ValidateName(*req.Name)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "name must not be empty")
+		return
+	}
+	network, err := s.network(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	contractID := chi.URLParam(r, "id")
+	if err := s.reg.Store().UpdateName(r.Context(), network, contractID, name); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	contract, err := s.reg.Store().GetContract(r.Context(), network, contractID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, contract)
+}
+
 // attest attaches a detached signature over the statement to the response.
 //
 // A signing failure leaves the response unsigned and logs it: the data is
