@@ -122,7 +122,7 @@ func writeSSEUpgrade(w http.ResponseWriter, flusher http.Flusher, u store.Upgrad
 		return false
 	}
 	id := refresher.UpgradeEventID(u)
-	if _, err := fmt.Fprintf(w, "id: %s\nevent: upgrade\ndata: %s\n\n", id, payload); err != nil {
+	if _, err := fmt.Fprintf(w, "id: %s\nevent: upgrade\ndata: %s\n\n", id, payload); err != nil { //nolint:gosec // G705: id is a deterministic hash, payload is JSON.Marshal output
 		return false
 	}
 	flusher.Flush()
