@@ -171,9 +171,6 @@ func TypeScript(iface *model.Interface, src Source) (string, error) {
 	for _, e := range sortedBy(iface.Types.Enums, func(e model.Enum) string { return e.Name }) {
 		g.writeEnum(e)
 	}
-	for _, ev := range sortedBy(iface.Events, func(ev model.Event) string { return ev.Name }) {
-		g.writeEvent(ev)
-	}
 	g.writeErrors(iface.Types.ErrorEnums)
 	g.writeEvents(iface)
 	g.writeClient(iface.Functions)
@@ -276,79 +273,6 @@ func (g *tsGen) writeEnum(e model.Enum) {
 	for _, c := range e.Cases {
 		g.writeDoc("  ", c.Doc)
 		fmt.Fprintf(&g.b, "  %s = %d,\n", propertyKey(c.Name), c.Value)
-	}
-	g.b.WriteString("}\n")
-}
-
-// writeEvent emits a prefix-topics constant and an interface for an event's
-// parameters split by Location ("topic-list" vs "data") and shaped according to
-// DataFormat ("single-value", "vec", or "map"). Event names that collide with
-// user-defined type names are disambiguated.
-func (g *tsGen) writeEvent(ev model.Event) {
-	base := typeName(ev.Name)
-	ifaceName := base
-	if g.claimed[ifaceName] {
-		ifaceName = g.claimIdentifier(base + "Event")
-	} else {
-		g.claimed[ifaceName] = true
-	}
-	topicsConst := g.claimIdentifier(base + "EventTopics")
-
-	var topicParams, dataParams []model.EventParam
-	for _, p := range ev.Params {
-		if p.Location == "topic-list" {
-			topicParams = append(topicParams, p)
-		} else {
-			dataParams = append(dataParams, p)
-		}
-	}
-
-	quotedPrefix := make([]string, len(ev.Prefix))
-	for i, topic := range ev.Prefix {
-		quotedPrefix[i] = strconv.Quote(topic)
-	}
-
-	g.b.WriteString("\n")
-	fmt.Fprintf(&g.b, "export const %s = [%s] as const;\n", topicsConst, strings.Join(quotedPrefix, ", "))
-
-	g.writeDoc("", ev.Doc)
-	fmt.Fprintf(&g.b, "export interface %s {\n", ifaceName)
-	if len(topicParams) == 0 {
-		g.b.WriteString("  topics: Record<string, never>;\n")
-	} else {
-		g.b.WriteString("  topics: {\n")
-		for _, p := range topicParams {
-			g.writeDoc("    ", p.Doc)
-			fmt.Fprintf(&g.b, "    %s: %s;\n", propertyKey(p.Name), g.tsType(p.Type))
-		}
-		g.b.WriteString("  };\n")
-	}
-
-	switch ev.DataFormat {
-	case "single-value":
-		if len(dataParams) == 0 {
-			g.b.WriteString("  data: void;\n")
-		} else {
-			g.writeDoc("  ", dataParams[0].Doc)
-			fmt.Fprintf(&g.b, "  data: %s;\n", g.tsType(dataParams[0].Type))
-		}
-	case "vec":
-		parts := make([]string, len(dataParams))
-		for i, p := range dataParams {
-			parts[i] = g.tsType(p.Type)
-		}
-		fmt.Fprintf(&g.b, "  data: readonly [%s];\n", strings.Join(parts, ", "))
-	default:
-		if len(dataParams) == 0 {
-			g.b.WriteString("  data: Record<string, never>;\n")
-		} else {
-			g.b.WriteString("  data: {\n")
-			for _, p := range dataParams {
-				g.writeDoc("    ", p.Doc)
-				fmt.Fprintf(&g.b, "    %s: %s;\n", propertyKey(p.Name), g.tsType(p.Type))
-			}
-			g.b.WriteString("  };\n")
-		}
 	}
 	g.b.WriteString("}\n")
 }

@@ -496,8 +496,10 @@ func TestTypeScriptEventDataFormatsAndCollision(t *testing.T) {
 		}
 		got, err := codegen.TypeScript(iface, src)
 		require.NoError(t, err)
-		assert.Contains(t, got, `export const MintEventTopics = ["Mint", "v1"] as const;`)
-		assert.Contains(t, got, "export interface Mint {\n  topics: {\n    to: string;\n  };\n  data: sdk.i128;\n}")
+		assert.Contains(t, got, `export const MintEventPrefix = ["Mint", "v1"] as const;`)
+		assert.Contains(t, got, "export interface MintEventTopics {\n  to: string;\n}")
+		assert.Contains(t, got, "export type MintEventData = sdk.i128;")
+		assert.Contains(t, got, "export interface MintEvent {\n  topics: MintEventTopics;\n  data: MintEventData;\n}")
 	})
 
 	t.Run("vec data format", func(t *testing.T) {
@@ -515,8 +517,10 @@ func TestTypeScriptEventDataFormatsAndCollision(t *testing.T) {
 		}
 		got, err := codegen.TypeScript(iface, src)
 		require.NoError(t, err)
-		assert.Contains(t, got, `export const SwapEventTopics = ["swap"] as const;`)
-		assert.Contains(t, got, "export interface Swap {\n  topics: {\n    trader: string;\n  };\n  data: readonly [sdk.i128, sdk.i128];\n}")
+		assert.Contains(t, got, `export const SwapEventPrefix = ["swap"] as const;`)
+		assert.Contains(t, got, "export interface SwapEventTopics {\n  trader: string;\n}")
+		assert.Contains(t, got, "export type SwapEventData = readonly [in_amount: sdk.i128, out_amount: sdk.i128];")
+		assert.Contains(t, got, "export interface SwapEvent {\n  topics: SwapEventTopics;\n  data: SwapEventData;\n}")
 	})
 
 	t.Run("map data format and type name collision", func(t *testing.T) {
@@ -541,7 +545,9 @@ func TestTypeScriptEventDataFormatsAndCollision(t *testing.T) {
 		got, err := codegen.TypeScript(iface, src)
 		require.NoError(t, err)
 		assert.Contains(t, got, "export interface Transfer {\n  amount: sdk.i128;\n}")
-		assert.Contains(t, got, `export const TransferEventTopics = ["transfer"] as const;`)
-		assert.Contains(t, got, "export interface TransferEvent {\n  topics: {\n    from: string;\n    to: string;\n  };\n  data: {\n    amount: sdk.i128;\n  };\n}")
+		assert.Contains(t, got, `export const TransferEventPrefix = ["transfer"] as const;`)
+		assert.Contains(t, got, "export interface TransferEventTopics {\n  from: string;\n  to: string;\n}")
+		assert.Contains(t, got, "export interface TransferEventData {\n  amount: sdk.i128;\n}")
+		assert.Contains(t, got, "export interface TransferEvent {\n  topics: TransferEventTopics;\n  data: TransferEventData;\n}")
 	})
 }
