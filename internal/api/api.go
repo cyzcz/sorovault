@@ -144,6 +144,7 @@ func (s *Server) Routes() chi.Router {
 	r.Get("/contracts/{id}", cacheable(s.getContract))
 	r.Patch("/contracts/{id}", s.write(s.renameContract))
 	r.Put("/contracts/{id}/source", s.write(s.updateContractSource))
+	r.Put("/contracts/{id}/tags", s.write(s.setContractTags))
 	r.Post("/contracts/{id}/verify", s.write(s.verifyPublisher))
 	r.Put("/contracts/{id}/deprecation", s.write(s.setContractDeprecation))
 	r.Delete("/contracts/{id}/deprecation", s.write(s.clearContractDeprecation))
@@ -514,6 +515,34 @@ func (s *Server) updateContractSource(w http.ResponseWriter, r *http.Request) {
 	}
 	contractID := chi.URLParam(r, "id")
 	if err := s.reg.Store().UpdateSource(r.Context(), network, contractID, sourceURL, commit); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	contract, err := s.reg.Store().GetContract(r.Context(), network, contractID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, contract)
+}
+
+func (s *Server) setContractTags(w http.ResponseWriter, r *http.Request) {
+	var req tagsRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Tags == nil {
+		writeError(w, http.StatusBadRequest, "tags is required")
+		return
+	}
+	network, err := s.network(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	contractID := chi.URLParam(r, "id")
+	if err := s.reg.Store().SetTags(r.Context(), network, contractID, req.Tags); err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -1083,6 +1112,7 @@ func (s *Server) listContracts(w http.ResponseWriter, r *http.Request) {
 		Functions:  q["function"],
 		Types:      q["type"],
 		Implements: q["implements"],
+		Tags:       q["tag"],
 		Limit:      intParam(q.Get("limit"), 0),
 		Offset:     offset,
 		Cursor:     cursor,
@@ -1171,6 +1201,7 @@ func (s *Server) getContract(w http.ResponseWriter, r *http.Request) {
 		Builtin:      builtin,
 		Name:         contract.Name,
 		Implements:   contract.Implements,
+		Tags:         contract.Tags,
 		SourceURL:    contract.SourceURL,
 		SourceCommit: contract.SourceCommit,
 		FirstSeen:    contract.FirstSeen.UTC(),
@@ -1453,11 +1484,31 @@ func (s *Server) registerContract(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "contract_id is required")
 		return
 	}
+	if len(req.Tags) > 0 {
+		if _, err := store.ValidateTags(req.Tags); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	}
 
 	result, err := s.reg.RegisterNamed(r.Context(), contractID, req.Name)
 	if err != nil {
 		s.fail(w, r, err)
 		return
+	}
+	if len(req.Tags) > 0 {
+		merged := append([]string{}, result.Contract.Tags...)
+		merged = append(merged, req.Tags...)
+		if err := s.reg.Store().SetTags(r.Context(), result.Contract.Network, contractID, merged); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		updated, err := s.reg.Store().GetContract(r.Context(), result.Contract.Network, contractID)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		result.Contract = *updated
 	}
 	s.publishUpgradeIfChanged(result)
 
@@ -1738,7 +1789,7 @@ func (s *Server) errorStatus(r *http.Request, err error) (int, string) {
 	case errors.Is(err, registry.ErrBusy), errors.Is(err, refresher.ErrStreamFull):
 		return http.StatusServiceUnavailable, err.Error()
 
-	case errors.Is(err, registry.ErrInvalidClaim), errors.Is(err, registry.ErrInvalidName):
+	case errors.Is(err, registry.ErrInvalidClaim), errors.Is(err, registry.ErrInvalidName), errors.Is(err, store.ErrInvalidTag):
 		return http.StatusBadRequest, err.Error()
 
 	case errors.Is(err, registry.ErrNotDeployer):
