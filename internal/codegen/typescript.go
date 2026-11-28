@@ -94,9 +94,24 @@ var identifier = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*$`)
 // it. Type mappings follow the conventions of the Stellar CLI's own
 // TypeScript bindings, so values round-trip through the SDK unchanged.
 func TypeScript(iface *model.Interface, src Source) (string, error) {
-	g := &tsGen{errorEnums: map[string]bool{}}
+	g := &tsGen{
+		errorEnums: map[string]bool{},
+		claimed:    map[string]bool{},
+	}
+	for name := range reservedTypeNames {
+		g.claimed[name] = true
+	}
 	for _, e := range iface.Types.ErrorEnums {
 		g.errorEnums[e.Name] = true
+	}
+	for _, s := range iface.Types.Structs {
+		g.claimed[typeName(s.Name)] = true
+	}
+	for _, u := range iface.Types.Unions {
+		g.claimed[typeName(u.Name)] = true
+	}
+	for _, e := range iface.Types.Enums {
+		g.claimed[typeName(e.Name)] = true
 	}
 
 	w := &g.b
@@ -172,6 +187,7 @@ func TypeScript(iface *model.Interface, src Source) (string, error) {
 type tsGen struct {
 	b          strings.Builder
 	errorEnums map[string]bool
+	claimed    map[string]bool
 	err        error
 
 	// schemaNames maps a user-defined type name to the const the schemas
