@@ -196,18 +196,6 @@ type tsGen struct {
 	schemaNames map[string]string
 }
 
-func (g *tsGen) claimIdentifier(base string) string {
-	name := base
-	if !identifier.MatchString(name) {
-		name = fmt.Sprintf("ContractEvent_%x", name)
-	}
-	for g.claimed[name] {
-		name += "_"
-	}
-	g.claimed[name] = true
-	return name
-}
-
 func (g *tsGen) writeDoc(indent, doc string) {
 	doc = strings.TrimSpace(doc)
 	if doc == "" {
