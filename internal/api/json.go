@@ -48,7 +48,8 @@ type registerRequest struct {
 	ContractID string `json:"contract_id"`
 	// Name is an optional display name. Empty keeps the contract's
 	// existing name.
-	Name string `json:"name,omitempty"`
+	Name string   `json:"name,omitempty"`
+	Tags []string `json:"tags,omitempty"`
 }
 
 // renameRequest is the body of PATCH /api/contracts/{id}.
@@ -91,6 +92,10 @@ type sourceRequest struct {
 	SourceCommit string `json:"source_commit,omitempty"`
 }
 
+type tagsRequest struct {
+	Tags []string `json:"tags"`
+}
+
 type listResponse struct {
 	Contracts []store.Contract `json:"contracts"`
 	Total     int              `json:"total"`
@@ -109,6 +114,7 @@ type contractResponse struct {
 	Builtin      bool       `json:"builtin,omitempty"`
 	Name         string     `json:"name,omitempty"`
 	Implements   []string   `json:"implements"`
+	Tags         []string   `json:"tags,omitempty"`
 	SourceURL    string     `json:"source_url,omitempty"`
 	SourceCommit string     `json:"source_commit,omitempty"`
 	FirstSeen    time.Time  `json:"first_seen"`

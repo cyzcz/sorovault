@@ -95,3 +95,12 @@ func TestHasVoted(t *testing.T) {
 		})
 	}
 }
+
+// BenchmarkNewClient measures the cost of constructing a generated client.
+func BenchmarkNewClient(b *testing.B) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = NewClient(ContractID, Network)
+	}
+}

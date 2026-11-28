@@ -17,7 +17,8 @@ import (
 
 // Postgres is the Store backed by a Postgres database.
 type Postgres struct {
-	pool *pgxpool.Pool
+	pool     *pgxpool.Pool
+	ownsPool bool
 }
 
 var _ Store = (*Postgres)(nil)
@@ -49,7 +50,7 @@ func NewPostgres(ctx context.Context, databaseURL string, opts PoolOptions) (*Po
 		pool.Close()
 		return nil, fmt.Errorf("store: pinging postgres: %w", err)
 	}
-	return &Postgres{pool: pool}, nil
+	return &Postgres{pool: pool, ownsPool: true}, nil
 }
 
 // ResolvePoolConfig parses databaseURL and applies opts to it, returning the
@@ -119,9 +120,12 @@ func (p *Postgres) Ping(ctx context.Context) error {
 	return nil
 }
 
-// Close releases the connection pool.
+// Close releases the connection pool if this store owns it.
+// A store created via NewPostgresFromPool does not own the pool and leaves it open.
 func (p *Postgres) Close() error {
-	p.pool.Close()
+	if p.ownsPool {
+		p.pool.Close()
+	}
 	return nil
 }
 
@@ -176,6 +180,10 @@ func (p *Postgres) Save(ctx context.Context, c Contract, iface *model.Interface)
 		return fmt.Errorf("store: encoding interface: %w", err)
 	}
 	c.Implements = spec.ImplementedStandards(iface)
+	tags := autoTags(c.Implements, nil, c.Tags)
+	if tags == nil {
+		tags = []string{}
+	}
 
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
@@ -187,16 +195,17 @@ func (p *Postgres) Save(ctx context.Context, c Contract, iface *model.Interface)
 	// most recent successful fetch. Saving an interface means the contract
 	// was live, so a missing mark is cleared.
 	const upsertContract = `
-		INSERT INTO contracts (network, contract_id, current_wasm_hash, name, implements, first_seen, last_refreshed)
-		VALUES ($1, $2, $3, $4, $5, now(), now())
+		INSERT INTO contracts (network, contract_id, current_wasm_hash, name, implements, tags, first_seen, last_refreshed)
+		VALUES ($1, $2, $3, $4, $5, $6, now(), now())
 		ON CONFLICT (network, contract_id) DO UPDATE SET
 			current_wasm_hash = EXCLUDED.current_wasm_hash,
 			name              = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE contracts.name END,
 			implements        = EXCLUDED.implements,
+			tags              = ARRAY(SELECT DISTINCT unnest(contracts.tags || EXCLUDED.tags) ORDER BY 1),
 			last_refreshed    = now(),
 			missing_since     = NULL`
 
-	if _, err := tx.Exec(ctx, upsertContract, c.Network, c.ContractID, c.CurrentWasmHash, c.Name, c.Implements); err != nil {
+	if _, err := tx.Exec(ctx, upsertContract, c.Network, c.ContractID, c.CurrentWasmHash, c.Name, c.Implements, tags); err != nil {
 		return fmt.Errorf("store: saving contract %s: %w", c.ContractID, err)
 	}
 
@@ -225,7 +234,7 @@ func (p *Postgres) Save(ctx context.Context, c Contract, iface *model.Interface)
 func (p *Postgres) GetContract(ctx context.Context, network, contractID string) (*Contract, error) {
 	const q = `
 		SELECT network, contract_id, current_wasm_hash, name, source_url, source_commit, first_seen, last_refreshed, missing_since,
-		       implements, deprecated_since, successor, deprecation_note, creator, created_ledger, verified_by, verified_at, verified_wasm_hash
+		       implements, tags, deprecated_since, successor, deprecation_note, creator, created_ledger, verified_by, verified_at, verified_wasm_hash
 		FROM contracts
 		WHERE network = $1 AND contract_id = $2`
 
@@ -233,7 +242,7 @@ func (p *Postgres) GetContract(ctx context.Context, network, contractID string) 
 	err := p.pool.QueryRow(ctx, q, network, contractID).Scan(
 		&c.Network, &c.ContractID, &c.CurrentWasmHash, &c.Name, &c.SourceURL, &c.SourceCommit,
 		&c.FirstSeen, &c.LastRefreshed, &c.MissingSince,
-		&c.Implements, &c.DeprecatedSince, &c.Successor, &c.DeprecationNote,
+		&c.Implements, &c.Tags, &c.DeprecatedSince, &c.Successor, &c.DeprecationNote,
 		&c.Creator, &c.CreatedLedger, &c.VerifiedBy, &c.VerifiedAt, &c.VerifiedWasmHash,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -241,6 +250,9 @@ func (p *Postgres) GetContract(ctx context.Context, network, contractID string) 
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: loading contract %s: %w", contractID, err)
+	}
+	if len(c.Tags) == 0 {
+		c.Tags = nil
 	}
 	return &c, nil
 }
@@ -292,6 +304,26 @@ func (p *Postgres) ClearDeprecation(ctx context.Context, network, contractID str
 	tag, err := p.pool.Exec(ctx, q, network, contractID)
 	if err != nil {
 		return fmt.Errorf("store: clearing deprecation for %s: %w", contractID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: contract %s on %s", ErrNotFound, contractID, network)
+	}
+	return nil
+}
+
+// SetTags replaces a contract's tags with the validated, lowercase tags.
+func (p *Postgres) SetTags(ctx context.Context, network, contractID string, tags []string) error {
+	normalized, err := ValidateTags(tags)
+	if err != nil {
+		return err
+	}
+	if normalized == nil {
+		normalized = []string{}
+	}
+	const q = `UPDATE contracts SET tags = $3 WHERE network = $1 AND contract_id = $2`
+	tag, err := p.pool.Exec(ctx, q, network, contractID, normalized)
+	if err != nil {
+		return fmt.Errorf("store: setting tags for %s: %w", contractID, err)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("%w: contract %s on %s", ErrNotFound, contractID, network)
@@ -417,7 +449,7 @@ func (p *Postgres) Export(ctx context.Context) (*Snapshot, error) {
 	const contractsQuery = `
 		SELECT network, contract_id, current_wasm_hash, name, source_url, source_commit,
 		       first_seen, last_refreshed, missing_since,
-		       implements, deprecated_since, successor, deprecation_note,
+		       implements, tags, deprecated_since, successor, deprecation_note,
 		       creator, created_ledger, verified_by, verified_at, verified_wasm_hash
 		FROM contracts
 		ORDER BY network, contract_id`
@@ -435,10 +467,13 @@ func (p *Postgres) Export(ctx context.Context) (*Snapshot, error) {
 		if err := rows.Scan(
 			&c.Network, &c.ContractID, &c.CurrentWasmHash, &c.Name, &c.SourceURL, &c.SourceCommit,
 			&c.FirstSeen, &c.LastRefreshed, &c.MissingSince,
-			&c.Implements, &c.DeprecatedSince, &c.Successor, &c.DeprecationNote,
+			&c.Implements, &c.Tags, &c.DeprecatedSince, &c.Successor, &c.DeprecationNote,
 			&c.Creator, &c.CreatedLedger, &c.VerifiedBy, &c.VerifiedAt, &c.VerifiedWasmHash,
 		); err != nil {
 			return nil, fmt.Errorf("store: scanning exported contract: %w", err)
+		}
+		if len(c.Tags) == 0 {
+			c.Tags = nil
 		}
 		index[key(c.Network, c.ContractID)] = len(snapshot.Contracts)
 		snapshot.Contracts = append(snapshot.Contracts, ContractSnapshot{
@@ -513,10 +548,10 @@ func (p *Postgres) Import(ctx context.Context, snapshot *Snapshot, merge bool) e
 		INSERT INTO contracts (
 			network, contract_id, current_wasm_hash, name, source_url, source_commit,
 			first_seen, last_refreshed, missing_since,
-			implements, deprecated_since, successor, deprecation_note,
+			implements, tags, deprecated_since, successor, deprecation_note,
 			creator, created_ledger, verified_by, verified_at, verified_wasm_hash
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
 		ON CONFLICT (network, contract_id) DO NOTHING`
 
 	const insertSpec = `
@@ -526,10 +561,14 @@ func (p *Postgres) Import(ctx context.Context, snapshot *Snapshot, merge bool) e
 
 	for _, cs := range snapshot.Contracts {
 		c := cs.Contract
+		tags := c.Tags
+		if tags == nil {
+			tags = []string{}
+		}
 		if _, err := tx.Exec(ctx, insertContract,
 			c.Network, c.ContractID, c.CurrentWasmHash, c.Name, c.SourceURL, c.SourceCommit,
 			c.FirstSeen, c.LastRefreshed, c.MissingSince,
-			c.Implements, c.DeprecatedSince, c.Successor, c.DeprecationNote,
+			c.Implements, tags, c.DeprecatedSince, c.Successor, c.DeprecationNote,
 			c.Creator, int64(c.CreatedLedger), c.VerifiedBy, c.VerifiedAt, c.VerifiedWasmHash); err != nil {
 			return fmt.Errorf("store: importing contract %s: %w", c.ContractID, err)
 		}
@@ -597,7 +636,7 @@ func (p *Postgres) ListContracts(ctx context.Context, f ListFilter) (*ContractPa
 		WITH matched AS (
 			SELECT c.network, c.contract_id, c.current_wasm_hash, c.name, c.source_url, c.source_commit,
 			       c.first_seen, c.last_refreshed, c.missing_since,
-			       c.implements, c.deprecated_since, c.successor, c.deprecation_note,
+			       c.implements, c.tags, c.deprecated_since, c.successor, c.deprecation_note,
 			       c.creator, c.created_ledger, c.verified_by, c.verified_at, c.verified_wasm_hash,
 			       COALESCE(c.symbols, '') AS symbols, COALESCE(c.docs_tsv, ''::tsvector) AS docs,
 			       ($2 = '' OR c.contract_id ILIKE '%' || $2 || '%'
@@ -676,9 +715,10 @@ func (p *Postgres) ListContracts(ctx context.Context, f ListFilter) (*ContractPa
 			          SELECT 1 FROM jsonb_array_elements(COALESCE(c.spec->'types'->'error_enums', '[]'::jsonb)) AS t
 			          WHERE t->>'name' = want.name))
 			  AND (COALESCE(cardinality($5::text[]), 0) = 0 OR c.implements @> $5::text[])
+			  AND (COALESCE(cardinality($13::text[]), 0) = 0 OR c.tags @> $13::text[])
 		)
 		SELECT network, contract_id, current_wasm_hash, name, source_url, source_commit, first_seen, last_refreshed,
-		       missing_since, implements, deprecated_since, successor, deprecation_note,
+		       missing_since, implements, tags, deprecated_since, successor, deprecation_note,
 		       creator, created_ledger, verified_by, verified_at, verified_wasm_hash,
 		       symbols, name_hit, count(*) OVER () AS total
 		FROM matched
@@ -719,7 +759,7 @@ func (p *Postgres) ListContracts(ctx context.Context, f ListFilter) (*ContractPa
 	}
 
 	rows, err := p.pool.Query(ctx, q, pgx.QueryExecModeDescribeExec, f.Network, escapeLike(f.Query), f.Functions, f.Types, f.Implements, f.Limit, f.Offset,
-		cursorTime, cursorID, cursorNetwork, docMatchLower(f.Query), cursorTier)
+		cursorTime, cursorID, cursorNetwork, docMatchLower(f.Query), cursorTier, f.Tags)
 	if err != nil {
 		return nil, fmt.Errorf("store: listing contracts: %w", err)
 	}
@@ -736,11 +776,14 @@ func (p *Postgres) ListContracts(ctx context.Context, f ListFilter) (*ContractPa
 		if err := rows.Scan(
 			&c.Network, &c.ContractID, &c.CurrentWasmHash, &c.Name, &c.SourceURL, &c.SourceCommit,
 			&c.FirstSeen, &c.LastRefreshed, &c.MissingSince,
-			&c.Implements, &c.DeprecatedSince, &c.Successor, &c.DeprecationNote,
+			&c.Implements, &c.Tags, &c.DeprecatedSince, &c.Successor, &c.DeprecationNote,
 			&c.Creator, &c.CreatedLedger, &c.VerifiedBy, &c.VerifiedAt, &c.VerifiedWasmHash,
 			&symbols, &nameHit, &total,
 		); err != nil {
 			return nil, fmt.Errorf("store: scanning contract: %w", err)
+		}
+		if len(c.Tags) == 0 {
+			c.Tags = nil
 		}
 		// An unqueried listing computes name_hit true for every row, but
 		// its rank is meaningless: it sorts on refresh time alone, and the
@@ -800,7 +843,7 @@ func (p *Postgres) ListContractsByWasm(ctx context.Context, f WasmFilter) (*Wasm
 	const q = `
 		SELECT c.network, c.contract_id, c.current_wasm_hash, c.name, c.source_url, c.source_commit,
 		       c.first_seen, c.last_refreshed, c.missing_since,
-		       c.implements, c.deprecated_since, c.successor, c.deprecation_note,
+		       c.implements, c.tags, c.deprecated_since, c.successor, c.deprecation_note,
 		       c.creator, c.created_ledger, c.verified_by, c.verified_at, c.verified_wasm_hash,
 		       c.current_wasm_hash = $2 AS current,
 		       count(*) OVER () AS total
@@ -826,11 +869,14 @@ func (p *Postgres) ListContractsByWasm(ctx context.Context, f WasmFilter) (*Wasm
 		if err := rows.Scan(
 			&c.Network, &c.ContractID, &c.CurrentWasmHash, &c.Name, &c.SourceURL, &c.SourceCommit,
 			&c.FirstSeen, &c.LastRefreshed, &c.MissingSince,
-			&c.Implements, &c.DeprecatedSince, &c.Successor, &c.DeprecationNote,
+			&c.Implements, &c.Tags, &c.DeprecatedSince, &c.Successor, &c.DeprecationNote,
 			&c.Creator, &c.CreatedLedger, &c.VerifiedBy, &c.VerifiedAt, &c.VerifiedWasmHash,
 			&c.Current, &total,
 		); err != nil {
 			return nil, fmt.Errorf("store: scanning contract: %w", err)
+		}
+		if len(c.Tags) == 0 {
+			c.Tags = nil
 		}
 		page.Contracts = append(page.Contracts, c)
 		page.Total = total
@@ -934,7 +980,7 @@ func (p *Postgres) Stats(ctx context.Context) (*Stats, error) {
 
 	const latestQ = `
 		SELECT network, contract_id, current_wasm_hash, name, source_url, source_commit, first_seen, last_refreshed, missing_since,
-		       creator, created_ledger, verified_by, verified_at, verified_wasm_hash
+		       implements, tags, creator, created_ledger, verified_by, verified_at, verified_wasm_hash
 		FROM contracts
 		ORDER BY first_seen DESC, contract_id
 		LIMIT 1`
@@ -943,7 +989,7 @@ func (p *Postgres) Stats(ctx context.Context) (*Stats, error) {
 	err = p.pool.QueryRow(ctx, latestQ).Scan(
 		&latest.Network, &latest.ContractID, &latest.CurrentWasmHash, &latest.Name,
 		&latest.SourceURL, &latest.SourceCommit, &latest.FirstSeen, &latest.LastRefreshed,
-		&latest.MissingSince,
+		&latest.MissingSince, &latest.Implements, &latest.Tags,
 		&latest.Creator, &latest.CreatedLedger, &latest.VerifiedBy, &latest.VerifiedAt, &latest.VerifiedWasmHash,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -951,6 +997,9 @@ func (p *Postgres) Stats(ctx context.Context) (*Stats, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: loading most recently registered contract: %w", err)
+	}
+	if len(latest.Tags) == 0 {
+		latest.Tags = nil
 	}
 	stats.Latest = &latest
 	return stats, nil
@@ -1246,10 +1295,11 @@ func (p *Postgres) countContracts(ctx context.Context, f ListFilter) (int, error
 		          UNION ALL
 		          SELECT 1 FROM jsonb_array_elements(COALESCE(c.spec->'types'->'error_enums', '[]'::jsonb)) AS t
 		          WHERE t->>'name' = want.name))
-		  AND (COALESCE(cardinality($5::text[]), 0) = 0 OR c.implements @> $5::text[])`
+		  AND (COALESCE(cardinality($5::text[]), 0) = 0 OR c.implements @> $5::text[])
+		  AND (COALESCE(cardinality($7::text[]), 0) = 0 OR c.tags @> $7::text[])`
 
 	var total int
-	if err := p.pool.QueryRow(ctx, q, pgx.QueryExecModeDescribeExec, f.Network, escapeLike(f.Query), f.Functions, f.Types, f.Implements, docMatchLower(f.Query)).Scan(&total); err != nil {
+	if err := p.pool.QueryRow(ctx, q, pgx.QueryExecModeDescribeExec, f.Network, escapeLike(f.Query), f.Functions, f.Types, f.Implements, docMatchLower(f.Query), f.Tags).Scan(&total); err != nil {
 		return 0, fmt.Errorf("store: counting contracts: %w", err)
 	}
 	return total, nil
